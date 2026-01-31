@@ -134,6 +134,22 @@ def main() -> int:
         help="Upload acquired PDFs to Backblaze B2",
     )
 
+    # depth2 command
+    depth2_parser = subparsers.add_parser(
+        "depth2", help="Harvest depth-2 references from CrossRef"
+    )
+    depth2_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory (contains bibliography.json)",
+    )
+    depth2_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max depth-1 refs to harvest from (0 = all)",
+    )
+
     # status command
     status_parser = subparsers.add_parser(
         "status", help="Show pipeline status"
@@ -189,6 +205,14 @@ def main() -> int:
             paper_filter=args.paper,
             skip_download=args.skip_download,
             upload_b2=args.upload_b2,
+        )
+
+    elif args.command == "depth2":
+        from .bib.depth2 import harvest_depth2
+        return harvest_depth2(
+            data_dir=args.data_dir.resolve(),
+            limit=args.limit,
+            verbose=True,
         )
 
     elif args.command == "status":
