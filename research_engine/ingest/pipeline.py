@@ -176,11 +176,13 @@ def ingest_main(
 def status_main(data_dir: Path, by_paper: bool = False) -> int:
     """Show pipeline status."""
     refs = _load_bibliography(data_dir)
-    total = len(refs)
+
+    depth1 = [r for r in refs if r.get("depth", 1) == 1]
+    depth2 = [r for r in refs if r.get("depth") == 2]
 
     with_doi = [r for r in refs if r.get("doi")]
-    with_title = [r for r in refs if r.get("title")]
-    with_arxiv = [r for r in refs if r.get("arxiv_id")]
+    d1_doi = [r for r in depth1 if r.get("doi")]
+    d2_doi = [r for r in depth2 if r.get("doi")]
 
     pdf_dir = data_dir / "pdfs"
     text_dir = data_dir / "text"
@@ -196,11 +198,14 @@ def status_main(data_dir: Path, by_paper: bool = False) -> int:
     print(f"\n{'='*60}")
     print("Research Engine — Pipeline Status")
     print(f"{'='*60}")
-    print(f"\n  References:           {total}")
-    print(f"  With titles:          {len(with_title)} ({100*len(with_title)//max(total,1)}%)")
-    print(f"  With DOIs:            {len(with_doi)} ({100*len(with_doi)//max(total,1)}%)")
-    print(f"  With arXiv IDs:       {len(with_arxiv)}")
-    print(f"  Missing DOIs:         {total - len(with_doi)}")
+
+    print(f"\n  Depth-1 references:   {len(depth1)}")
+    print(f"    With DOIs:          {len(d1_doi)} ({100*len(d1_doi)//max(len(depth1),1)}%)")
+    if depth2:
+        print(f"  Depth-2 references:   {len(depth2)}")
+        print(f"    With DOIs:          {len(d2_doi)} ({100*len(d2_doi)//max(len(depth2),1)}%)")
+    print(f"  Total references:     {len(refs)}")
+    print(f"  Total with DOIs:      {len(with_doi)}")
     print()
     print(f"  PDFs acquired:        {total_pdfs}")
     print(f"  Text extracted:       {total_text}")
@@ -215,7 +220,7 @@ def status_main(data_dir: Path, by_paper: bool = False) -> int:
 
     if by_paper:
         print(f"\n{'='*60}")
-        print("Breakdown by Paper")
+        print("Breakdown by Paper (depth-1 only)")
         print(f"{'='*60}")
 
         paper_stats = defaultdict(lambda: {"total": 0, "doi": 0, "pdf": 0, "text": 0})
@@ -227,7 +232,7 @@ def status_main(data_dir: Path, by_paper: bool = False) -> int:
         if text_dir.exists():
             text_keys = {p.stem for p in text_dir.glob("*.txt")}
 
-        for r in refs:
+        for r in depth1:
             folder = _paper_folder(r)
             paper_stats[folder]["total"] += 1
             if r.get("doi"):
@@ -237,12 +242,18 @@ def status_main(data_dir: Path, by_paper: bool = False) -> int:
             if r["cite_key"] in text_keys:
                 paper_stats[folder]["text"] += 1
 
-        # Sort by total refs descending
+        # Filter out _archive papers and sort by total refs descending
+        active_papers = {k: v for k, v in paper_stats.items() if not k.startswith("_archive")}
+
         print(f"\n  {'Paper':<45} {'Refs':>5} {'DOI':>5} {'PDF':>5} {'Text':>5}")
         print(f"  {'-'*45} {'-'*5} {'-'*5} {'-'*5} {'-'*5}")
-        for folder in sorted(paper_stats, key=lambda k: paper_stats[k]["total"], reverse=True):
-            s = paper_stats[folder]
+        for folder in sorted(active_papers, key=lambda k: active_papers[k]["total"], reverse=True):
+            s = active_papers[folder]
             print(f"  {folder:<45} {s['total']:>5} {s['doi']:>5} {s['pdf']:>5} {s['text']:>5}")
+
+        if paper_stats.keys() - active_papers.keys():
+            archive_total = sum(v["total"] for k, v in paper_stats.items() if k.startswith("_archive"))
+            print(f"\n  (+ {archive_total} refs from archived papers)")
 
     print()
     return 0
