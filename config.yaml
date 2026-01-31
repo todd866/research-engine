@@ -1,0 +1,62 @@
+# Research Engine Configuration
+# Research profile for paper discovery
+
+paths:
+  output_dir: ~/Papers/harvester
+
+discovery:
+  interval_hours: 12
+  max_papers_per_run: 50
+  lookback_days: 30
+
+library:
+  ezproxy_host: ezproxy.library.usyd.edu.au
+  browser: chrome
+
+research_profile:
+  keywords:
+    # Core concepts
+    - "intrinsic dimensionality"
+    - "effective dimensionality"
+    - "information geometry"
+    - "neural state space"
+    - "neural manifold"
+    - "participation ratio"
+    - "coherence time"
+    - "thermodynamic computation"
+    - "dimensional collapse"
+    - "oscillatory dynamics"
+    - "high-dimensional dynamics"
+    - "effective degrees of freedom"
+    - "state space dimensionality"
+    - "neural dimensionality"
+    - "spectral entropy"
+    - "dynamical systems neuroscience"
+
+  authors:
+    - "Andrei Igamberdiev"
+    - "Karl Friston"
+    - "Giulio Tononi"
+    - "Michael Levin"
+    - "Carsen Stringer"
+    - "Surya Ganguli"
+    - "Christian Machens"
+    - "Mark Churchland"
+    - "Anne Churchland"
+    - "Misha Bhargava Morales"
+    - "SueYeon Chung"
+
+  arxiv_categories:
+    - "q-bio.NC"
+    - "q-bio.QM"
+    - "cond-mat.stat-mech"
+    - "physics.bio-ph"
+    - "cs.IT"
+    - "nlin.AO"
+
+  semantic_scholar_fields:
+    - "Biology"
+    - "Computer Science"
+    - "Physics"
+    - "Medicine"
+    - "Mathematics"

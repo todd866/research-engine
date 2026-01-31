@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PDFs (stored in B2, not git)
+*.pdf
+
+# Large model files
+*.bin
+*.onnx
+
+# Secrets
+.env
+*.key
