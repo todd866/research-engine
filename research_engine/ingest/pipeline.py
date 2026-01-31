@@ -107,6 +107,7 @@ def _process_one_ref(
             or resp.url.endswith(".pdf")
         )
         if not is_pdf:
+            stats["not_pdf"] = 1
             return stats
 
         with open(pdf_path, "wb") as f:
@@ -121,7 +122,8 @@ def _process_one_ref(
             return stats
 
         stats["downloaded"] = 1
-    except Exception:
+    except Exception as e:
+        stats["dl_fail"] = 1
         if pdf_path.exists():
             pdf_path.unlink()
         return stats
@@ -133,7 +135,7 @@ def _process_one_ref(
         stats["extracted"] = 1
     except Exception as e:
         stats["failed"] = 1
-        # Clean up PDF even if text extraction fails
+        print(f"    extract failed: {cite_key}: {e}")
         if pdf_path.exists():
             pdf_path.unlink()
         return stats
@@ -258,7 +260,7 @@ def ingest_main(
     print(f"{'='*60}")
 
     totals = {
-        "checked": 0, "oa_found": 0, "downloaded": 0,
+        "checked": 0, "oa_found": 0, "downloaded": 0, "not_pdf": 0, "dl_fail": 0,
         "extracted": 0, "uploaded": 0, "failed": 0, "skipped_done": 0,
     }
 
@@ -278,10 +280,14 @@ def ingest_main(
         # Progress every 50 refs
         if (i + 1) % 50 == 0:
             print(f"  [{i+1}/{len(with_doi)}] "
-                  f"OA: {totals['oa_found']}, "
-                  f"text: {totals['extracted']}, "
-                  f"B2: {totals['uploaded']}, "
-                  f"skip: {totals['skipped_done']}")
+                  f"OA:{totals['oa_found']} "
+                  f"dl:{totals['downloaded']} "
+                  f"txt:{totals['extracted']} "
+                  f"B2:{totals['uploaded']} "
+                  f"skip:{totals['skipped_done']} "
+                  f"fail:{totals['failed']} "
+                  f"notpdf:{totals['not_pdf']} "
+                  f"dlfail:{totals['dl_fail']}")
 
     # Summary
     total_pdfs_b2 = len(manifest.get("pdfs", {}))
