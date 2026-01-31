@@ -1,4 +1,8 @@
-"""Ingest pipeline: OA acquisition + text extraction + optional B2 upload."""
+"""Ingest pipeline: OA acquisition + text extraction + optional B2 upload.
+
+Processes one reference at a time to keep disk usage minimal:
+  check Unpaywall → download PDF → extract text → upload B2 → delete local.
+"""
 
 import json
 import time
@@ -50,6 +54,108 @@ def _paper_folder(ref: dict) -> str:
     return "unknown"
 
 
+def _process_one_ref(
+    ref: dict,
+    pdf_dir: Path,
+    text_dir: Path,
+    manifest_path: Path,
+    manifest: dict,
+    session,
+    b2_bucket,
+) -> dict:
+    """Process a single reference: check OA → download → extract → upload → delete.
+
+    Returns a stats dict with keys: checked, oa_found, downloaded, extracted, uploaded, failed.
+    """
+    from .open_access import check_unpaywall, RATE_LIMIT_DELAY
+
+    stats = {
+        "checked": 1, "oa_found": 0, "downloaded": 0,
+        "extracted": 0, "uploaded": 0, "failed": 0, "skipped_done": 0,
+    }
+
+    cite_key = ref["cite_key"]
+    doi = ref["doi"]
+    text_path = text_dir / f"{cite_key}.txt"
+
+    # Already have text — skip entirely
+    if text_path.exists():
+        stats["skipped_done"] = 1
+        return stats
+
+    time.sleep(RATE_LIMIT_DELAY)
+
+    # Step 1: Check Unpaywall for OA PDF URL
+    pdf_url = check_unpaywall(doi, session=session)
+    if not pdf_url:
+        return stats
+
+    stats["oa_found"] = 1
+    pdf_path = pdf_dir / f"{cite_key}.pdf"
+
+    # Step 2: Download PDF
+    try:
+        import requests
+        resp = session.get(pdf_url, timeout=60, stream=True, allow_redirects=True)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("content-type", "")
+        is_pdf = (
+            "pdf" in content_type.lower()
+            or pdf_url.endswith(".pdf")
+            or "/pdf/" in pdf_url
+            or resp.url.endswith(".pdf")
+        )
+        if not is_pdf:
+            return stats
+
+        with open(pdf_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # Verify magic bytes
+        with open(pdf_path, "rb") as f:
+            header = f.read(5)
+        if header != b"%PDF-":
+            pdf_path.unlink()
+            return stats
+
+        stats["downloaded"] = 1
+    except Exception:
+        if pdf_path.exists():
+            pdf_path.unlink()
+        return stats
+
+    # Step 3: Extract text
+    try:
+        from .extract_text import extract_text
+        extract_text(pdf_path, text_path)
+        stats["extracted"] = 1
+    except Exception as e:
+        stats["failed"] = 1
+        # Clean up PDF even if text extraction fails
+        if pdf_path.exists():
+            pdf_path.unlink()
+        return stats
+
+    # Step 4: Upload to B2 (if configured)
+    if b2_bucket and cite_key not in manifest.get("pdfs", {}):
+        try:
+            from .cloud_store import upload_pdf, update_manifest
+            file_id = upload_pdf(pdf_path, cite_key, bucket=b2_bucket)
+            update_manifest(manifest_path, cite_key, file_id, doi=doi)
+            stats["uploaded"] = 1
+        except Exception as e:
+            # Text is saved — PDF stays local as fallback
+            pass
+
+    # Step 5: Delete local PDF (text is saved, PDF is in B2 or not needed locally)
+    if pdf_path.exists():
+        pdf_path.unlink()
+
+    return stats
+
+
 def ingest_main(
     data_dir: Path,
     limit: int = 0,
@@ -57,10 +163,10 @@ def ingest_main(
     skip_download: bool = False,
     upload_b2: bool = False,
 ) -> int:
-    """Run the ingest pipeline: acquire OA PDFs, extract text, store in B2.
+    """Run the ingest pipeline: per-ref OA acquisition + text extraction + B2.
 
-    When upload_b2 is True, each PDF is uploaded to B2 and deleted locally
-    after text extraction, keeping disk usage low.
+    Processes one reference at a time to keep disk usage minimal.
+    For each DOI: check Unpaywall → download PDF → extract text → upload B2 → delete local.
 
     Args:
         data_dir: Path to literature-data directory
@@ -69,6 +175,8 @@ def ingest_main(
         skip_download: Skip OA download, only extract text from existing PDFs
         upload_b2: Upload acquired PDFs to B2 after download (and delete local)
     """
+    import requests
+
     refs = _load_bibliography(data_dir)
     total = len(refs)
 
@@ -92,7 +200,7 @@ def ingest_main(
     pdf_dir.mkdir(parents=True, exist_ok=True)
     text_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load manifest to skip already-processed PDFs
+    # Load manifest
     manifest_path = data_dir / "pdf_manifest.json"
     manifest = {"pdfs": {}}
     if manifest_path.exists():
@@ -111,95 +219,86 @@ def ingest_main(
             print("  Continuing without B2. PDFs will stay on disk.")
             b2_bucket = None
 
-    # Phase 1: OA acquisition
-    acquired = {}
-    if not skip_download:
-        from .open_access import acquire_oa_pdfs
-        print(f"\n{'='*60}")
-        print("Phase 1: Open Access PDF Acquisition")
-        print(f"{'='*60}")
-        acquired = acquire_oa_pdfs(with_doi, pdf_dir, limit=0, verbose=True)
-    else:
-        # Count existing PDFs
-        for r in with_doi:
-            pdf_path = pdf_dir / f"{r['cite_key']}.pdf"
-            if pdf_path.exists():
-                acquired[r["cite_key"]] = str(pdf_path)
-        print(f"\nSkipping download. Found {len(acquired)} existing PDFs.")
+    # Handle skip_download: just extract text from existing PDFs
+    if skip_download:
+        existing_pdfs = list(pdf_dir.glob("*.pdf"))
+        print(f"\nSkipping download. Processing {len(existing_pdfs)} existing PDFs.")
+        extracted = 0
+        for pdf_path in sorted(existing_pdfs):
+            cite_key = pdf_path.stem
+            text_path = text_dir / f"{cite_key}.txt"
+            if not text_path.exists():
+                try:
+                    from .extract_text import extract_text
+                    extract_text(pdf_path, text_path)
+                    extracted += 1
+                except Exception as e:
+                    print(f"  Failed: {pdf_path.name}: {e}")
+            if b2_bucket:
+                if cite_key not in manifest.get("pdfs", {}):
+                    try:
+                        from .cloud_store import upload_pdf, update_manifest
+                        file_id = upload_pdf(pdf_path, cite_key, bucket=b2_bucket)
+                        ref = next((r for r in refs if r.get("cite_key") == cite_key), {})
+                        update_manifest(manifest_path, cite_key, file_id, doi=ref.get("doi", ""))
+                        with open(manifest_path) as f:
+                            manifest = json.load(f)
+                    except Exception:
+                        pass
+                pdf_path.unlink()
+        print(f"  Extracted: {extracted}")
+        return 0
 
-    # Phase 2: Text extraction (+ B2 upload + local delete)
+    # Main per-reference loop
+    session = requests.Session()
+    session.headers["User-Agent"] = "research-engine/0.1.0 (mailto:itod2305@uni.sydney.edu.au)"
+
     print(f"\n{'='*60}")
-    print("Phase 2: Text Extraction" + (" + B2 Upload" if b2_bucket else ""))
+    print("Per-PDF Ingest: Unpaywall → Download → Extract → B2 → Delete")
     print(f"{'='*60}")
 
-    extracted = 0
-    skipped = 0
-    failed = 0
-    uploaded = 0
-    deleted_local = 0
+    totals = {
+        "checked": 0, "oa_found": 0, "downloaded": 0,
+        "extracted": 0, "uploaded": 0, "failed": 0, "skipped_done": 0,
+    }
 
-    # Process all PDFs in pdf_dir
-    for pdf_path in sorted(pdf_dir.glob("*.pdf")):
-        cite_key = pdf_path.stem
-        text_path = text_dir / f"{cite_key}.txt"
+    for i, ref in enumerate(with_doi):
+        result = _process_one_ref(
+            ref, pdf_dir, text_dir, manifest_path, manifest, session, b2_bucket,
+        )
 
-        # Extract text if not already done
-        if not text_path.exists():
-            try:
-                from .extract_text import extract_text
-                extract_text(pdf_path, text_path)
-                extracted += 1
-                if extracted % 10 == 0:
-                    print(f"  Extracted: {extracted}")
-            except Exception as e:
-                failed += 1
-                print(f"  Failed: {pdf_path.name}: {e}")
-                continue
-        else:
-            skipped += 1
+        for k in totals:
+            totals[k] += result.get(k, 0)
 
-        # Upload to B2 and delete local copy
-        if b2_bucket and cite_key not in manifest.get("pdfs", {}):
-            try:
-                from .cloud_store import upload_pdf, update_manifest
-                file_id = upload_pdf(pdf_path, cite_key, bucket=b2_bucket)
-                ref = next((r for r in refs if r.get("cite_key") == cite_key), {})
-                update_manifest(manifest_path, cite_key, file_id, doi=ref.get("doi", ""))
-                # Reload manifest after update
-                with open(manifest_path) as f:
-                    manifest = json.load(f)
-                uploaded += 1
-                # Delete local PDF to save disk
-                pdf_path.unlink()
-                deleted_local += 1
-            except Exception as e:
-                print(f"  B2 upload failed for {cite_key}: {e}")
-        elif b2_bucket and cite_key in manifest.get("pdfs", {}):
-            # Already in B2, just delete local copy
-            pdf_path.unlink()
-            deleted_local += 1
+        # Reload manifest periodically (after uploads)
+        if result.get("uploaded") and manifest_path.exists():
+            with open(manifest_path) as f:
+                manifest = json.load(f)
 
-    print(f"\n  Newly extracted: {extracted}")
-    print(f"  Already had text: {skipped}")
-    if failed:
-        print(f"  Failed: {failed}")
-    if uploaded:
-        print(f"  Uploaded to B2:   {uploaded}")
-    if deleted_local:
-        print(f"  Deleted local:    {deleted_local}")
+        # Progress every 50 refs
+        if (i + 1) % 50 == 0:
+            print(f"  [{i+1}/{len(with_doi)}] "
+                  f"OA: {totals['oa_found']}, "
+                  f"text: {totals['extracted']}, "
+                  f"B2: {totals['uploaded']}, "
+                  f"skip: {totals['skipped_done']}")
 
     # Summary
-    total_pdfs_local = len(list(pdf_dir.glob("*.pdf")))
     total_pdfs_b2 = len(manifest.get("pdfs", {}))
     total_text = len(list(text_dir.glob("*.txt")))
     print(f"\n{'='*60}")
     print("Ingest Summary")
     print(f"{'='*60}")
-    print(f"  Total references:     {total}")
-    print(f"  With DOIs:            {len([r for r in _load_bibliography(data_dir) if r.get('doi')])}")
-    print(f"  PDFs in B2:           {total_pdfs_b2}")
-    print(f"  PDFs local:           {total_pdfs_local}")
-    print(f"  Text files:           {total_text}")
+    print(f"  Checked:              {totals['checked']}")
+    print(f"  Already had text:     {totals['skipped_done']}")
+    print(f"  OA found:             {totals['oa_found']}")
+    print(f"  Downloaded:           {totals['downloaded']}")
+    print(f"  Text extracted:       {totals['extracted']}")
+    if totals['failed']:
+        print(f"  Failed:               {totals['failed']}")
+    print(f"  Uploaded to B2:       {totals['uploaded']}")
+    print(f"  Total text files:     {total_text}")
+    print(f"  Total PDFs in B2:     {total_pdfs_b2}")
     print(f"{'='*60}")
 
     return 0
