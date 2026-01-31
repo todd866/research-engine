@@ -18,7 +18,8 @@ RATE_LIMIT_DELAY = 0.2  # 5 req/sec
 def check_unpaywall(doi: str, session: Optional[requests.Session] = None) -> Optional[str]:
     """Check Unpaywall for an open access PDF URL.
 
-    Returns the best OA PDF URL, or None.
+    Returns the best OA direct PDF URL, or None.
+    Only returns url_for_pdf (not landing pages, which can't be downloaded).
     """
     s = session or requests.Session()
 
@@ -35,23 +36,25 @@ def check_unpaywall(doi: str, session: Optional[requests.Session] = None) -> Opt
     except (requests.RequestException, json.JSONDecodeError):
         return None
 
-    # Check best OA location
-    best = data.get("best_oa_location", {})
-    if best:
-        pdf_url = best.get("url_for_pdf")
-        if pdf_url:
-            return pdf_url
-        landing = best.get("url_for_landing_page")
-        if landing:
-            return landing
+    # Collect all PDF URLs from all OA locations
+    pdf_urls = []
 
-    # Check all OA locations
+    best = data.get("best_oa_location") or {}
+    if best.get("url_for_pdf"):
+        pdf_urls.append(best["url_for_pdf"])
+
     for loc in data.get("oa_locations", []):
-        pdf_url = loc.get("url_for_pdf")
-        if pdf_url:
-            return pdf_url
+        url = loc.get("url_for_pdf")
+        if url and url not in pdf_urls:
+            pdf_urls.append(url)
 
-    return None
+    # Prefer URLs that look like direct PDF links
+    for url in pdf_urls:
+        if url.endswith(".pdf") or "/pdf/" in url:
+            return url
+
+    # Fall back to any PDF URL
+    return pdf_urls[0] if pdf_urls else None
 
 
 def acquire_oa_pdfs(
@@ -110,16 +113,30 @@ def acquire_oa_pdfs(
             continue
 
         try:
-            resp = s.get(pdf_url, timeout=60, stream=True)
+            resp = s.get(pdf_url, timeout=60, stream=True, allow_redirects=True)
             resp.raise_for_status()
 
             content_type = resp.headers.get("content-type", "")
-            if "pdf" not in content_type.lower() and not pdf_url.endswith(".pdf"):
+            # Accept if content-type says PDF, URL ends in .pdf, or URL has /pdf/
+            is_pdf = (
+                "pdf" in content_type.lower()
+                or pdf_url.endswith(".pdf")
+                or "/pdf/" in pdf_url
+                or resp.url.endswith(".pdf")  # check after redirects
+            )
+            if not is_pdf:
                 continue
 
             with open(pdf_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
+
+            # Verify we got a real PDF (check magic bytes)
+            with open(pdf_path, "rb") as f:
+                header = f.read(5)
+            if header != b"%PDF-":
+                pdf_path.unlink()
+                continue
 
             acquired[cite_key] = str(pdf_path)
 

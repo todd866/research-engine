@@ -102,6 +102,53 @@ def main() -> int:
         help="Path to bibliography.json",
     )
 
+    # ingest command
+    ingest_parser = subparsers.add_parser(
+        "ingest", help="Acquire OA PDFs and extract text"
+    )
+    ingest_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory (contains bibliography.json)",
+    )
+    ingest_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max references to process (0 = all)",
+    )
+    ingest_parser.add_argument(
+        "--paper",
+        type=str,
+        default=None,
+        help="Filter to refs from a specific paper folder (e.g. 'biosystems/40_simulated_geometry')",
+    )
+    ingest_parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip OA download, only extract text from existing PDFs",
+    )
+    ingest_parser.add_argument(
+        "--upload-b2",
+        action="store_true",
+        help="Upload acquired PDFs to Backblaze B2",
+    )
+
+    # status command
+    status_parser = subparsers.add_parser(
+        "status", help="Show pipeline status"
+    )
+    status_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory",
+    )
+    status_parser.add_argument(
+        "--by-paper",
+        action="store_true",
+        help="Show breakdown by paper",
+    )
+
     args = parser.parse_args()
 
     if args.command == "extract":
@@ -133,6 +180,23 @@ def main() -> int:
     elif args.command == "pre-submit":
         from .bib.pre_submit import pre_submit_main
         return pre_submit_main(args.tex_file.resolve(), bib_path=args.bib)
+
+    elif args.command == "ingest":
+        from .ingest.pipeline import ingest_main
+        return ingest_main(
+            data_dir=args.data_dir.resolve(),
+            limit=args.limit,
+            paper_filter=args.paper,
+            skip_download=args.skip_download,
+            upload_b2=args.upload_b2,
+        )
+
+    elif args.command == "status":
+        from .ingest.pipeline import status_main
+        return status_main(
+            data_dir=args.data_dir.resolve(),
+            by_paper=args.by_paper,
+        )
 
     else:
         parser.print_help()
