@@ -13,5 +13,9 @@
   },
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "remoteEnv": {
+    "RESEARCH_DATA": "/workspaces/literature-data",
+    "PYTHONDONTWRITEBYTECODE": "1"
   }
 }
