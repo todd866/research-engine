@@ -63,15 +63,17 @@ def _process_one_ref(
     session,
     b2_bucket,
 ) -> dict:
-    """Process a single reference: check OA → download → extract → upload → delete.
+    """Process a single reference: find PDF → download → extract → upload → delete.
 
-    Returns a stats dict with keys: checked, oa_found, downloaded, extracted, uploaded, failed.
+    Tries multiple sources: publisher-specific URLs, PMC, then Unpaywall.
+    Returns a stats dict.
     """
-    from .open_access import check_unpaywall, RATE_LIMIT_DELAY
+    from .open_access import find_pdf_url, download_pdf
 
     stats = {
-        "checked": 1, "oa_found": 0, "downloaded": 0,
+        "checked": 1, "found": 0, "downloaded": 0,
         "extracted": 0, "uploaded": 0, "failed": 0, "skipped_done": 0,
+        "source": "",
     }
 
     cite_key = ref["cite_key"]
@@ -83,50 +85,20 @@ def _process_one_ref(
         stats["skipped_done"] = 1
         return stats
 
-    time.sleep(RATE_LIMIT_DELAY)
-
-    # Step 1: Check Unpaywall for OA PDF URL
-    pdf_url = check_unpaywall(doi, session=session)
+    # Step 1: Find a PDF URL (tries publisher patterns, PMC, Unpaywall)
+    pdf_url, source = find_pdf_url(doi, session)
     if not pdf_url:
         return stats
 
-    stats["oa_found"] = 1
+    stats["found"] = 1
+    stats["source"] = source
     pdf_path = pdf_dir / f"{cite_key}.pdf"
 
     # Step 2: Download PDF
-    try:
-        import requests
-        resp = session.get(pdf_url, timeout=60, stream=True, allow_redirects=True)
-        resp.raise_for_status()
-
-        content_type = resp.headers.get("content-type", "")
-        is_pdf = (
-            "pdf" in content_type.lower()
-            or pdf_url.endswith(".pdf")
-            or "/pdf/" in pdf_url
-            or resp.url.endswith(".pdf")
-        )
-        if not is_pdf:
-            stats["not_pdf"] = 1
-            return stats
-
-        with open(pdf_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        # Verify magic bytes
-        with open(pdf_path, "rb") as f:
-            header = f.read(5)
-        if header != b"%PDF-":
-            pdf_path.unlink()
-            return stats
-
-        stats["downloaded"] = 1
-    except Exception as e:
-        stats["dl_fail"] = 1
-        if pdf_path.exists():
-            pdf_path.unlink()
+    if not download_pdf(pdf_url, pdf_path, session):
         return stats
+
+    stats["downloaded"] = 1
 
     # Step 3: Extract text
     try:
@@ -147,8 +119,7 @@ def _process_one_ref(
             file_id = upload_pdf(pdf_path, cite_key, bucket=b2_bucket)
             update_manifest(manifest_path, cite_key, file_id, doi=doi)
             stats["uploaded"] = 1
-        except Exception as e:
-            # Text is saved — PDF stays local as fallback
+        except Exception:
             pass
 
     # Step 5: Delete local PDF (text is saved, PDF is in B2 or not needed locally)
@@ -260,9 +231,10 @@ def ingest_main(
     print(f"{'='*60}")
 
     totals = {
-        "checked": 0, "oa_found": 0, "downloaded": 0, "not_pdf": 0, "dl_fail": 0,
+        "checked": 0, "found": 0, "downloaded": 0,
         "extracted": 0, "uploaded": 0, "failed": 0, "skipped_done": 0,
     }
+    sources = {"publisher": 0, "pmc": 0, "unpaywall": 0}
 
     for i, ref in enumerate(with_doi):
         result = _process_one_ref(
@@ -271,6 +243,8 @@ def ingest_main(
 
         for k in totals:
             totals[k] += result.get(k, 0)
+        if result.get("source"):
+            sources[result["source"]] = sources.get(result["source"], 0) + 1
 
         # Reload manifest periodically (after uploads)
         if result.get("uploaded") and manifest_path.exists():
@@ -280,14 +254,12 @@ def ingest_main(
         # Progress every 50 refs
         if (i + 1) % 50 == 0:
             print(f"  [{i+1}/{len(with_doi)}] "
-                  f"OA:{totals['oa_found']} "
+                  f"found:{totals['found']} "
                   f"dl:{totals['downloaded']} "
                   f"txt:{totals['extracted']} "
                   f"B2:{totals['uploaded']} "
                   f"skip:{totals['skipped_done']} "
-                  f"fail:{totals['failed']} "
-                  f"notpdf:{totals['not_pdf']} "
-                  f"dlfail:{totals['dl_fail']}")
+                  f"(pub:{sources['publisher']} pmc:{sources['pmc']} unp:{sources['unpaywall']})")
 
     # Summary
     total_pdfs_b2 = len(manifest.get("pdfs", {}))
@@ -297,7 +269,10 @@ def ingest_main(
     print(f"{'='*60}")
     print(f"  Checked:              {totals['checked']}")
     print(f"  Already had text:     {totals['skipped_done']}")
-    print(f"  OA found:             {totals['oa_found']}")
+    print(f"  PDF found:            {totals['found']}")
+    print(f"    via publisher:      {sources['publisher']}")
+    print(f"    via PMC:            {sources['pmc']}")
+    print(f"    via Unpaywall:      {sources['unpaywall']}")
     print(f"  Downloaded:           {totals['downloaded']}")
     print(f"  Text extracted:       {totals['extracted']}")
     if totals['failed']:
