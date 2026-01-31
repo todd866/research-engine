@@ -150,6 +150,22 @@ def main() -> int:
         help="Max depth-1 refs to harvest from (0 = all)",
     )
 
+    # enrich command
+    enrich_parser = subparsers.add_parser(
+        "enrich", help="Enrich bibliography with abstracts from OpenAlex"
+    )
+    enrich_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory",
+    )
+    enrich_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max refs to process (0 = all)",
+    )
+
     # queue command
     queue_parser = subparsers.add_parser(
         "queue", help="Generate browser download queue"
@@ -170,6 +186,61 @@ def main() -> int:
         type=Path,
         default=None,
         help="Output path for queue JSON (default: data_dir/browser_queue.json)",
+    )
+
+    # embed command
+    embed_parser = subparsers.add_parser(
+        "embed", help="Embed references into vector index"
+    )
+    embed_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory",
+    )
+    embed_parser.add_argument(
+        "--model",
+        type=str,
+        default="all-MiniLM-L6-v2",
+        help="sentence-transformers model name (default: all-MiniLM-L6-v2)",
+    )
+    embed_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=256,
+        help="Batch size for encoding (default: 256)",
+    )
+
+    # search command
+    search_parser = subparsers.add_parser(
+        "search", help="Semantic search over reference embeddings"
+    )
+    search_parser.add_argument(
+        "query",
+        type=str,
+        help="Search query text",
+    )
+    search_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory",
+    )
+    search_parser.add_argument(
+        "-k",
+        type=int,
+        default=20,
+        help="Number of results (default: 20)",
+    )
+    search_parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Filter by depth (1 or 2)",
+    )
+    search_parser.add_argument(
+        "--model",
+        type=str,
+        default="all-MiniLM-L6-v2",
+        help="sentence-transformers model name (must match embed model)",
     )
 
     # status command
@@ -237,6 +308,14 @@ def main() -> int:
             verbose=True,
         )
 
+    elif args.command == "enrich":
+        from .ingest.enrich_abstracts import enrich_bibliography
+        enrich_bibliography(
+            data_dir=args.data_dir.resolve(),
+            limit=args.limit,
+        )
+        return 0
+
     elif args.command == "queue":
         from .ingest.browser_queue import generate_queue
         queue = generate_queue(
@@ -253,6 +332,40 @@ def main() -> int:
             print(f"    {prefix}: {count}")
         out = args.output or (args.data_dir.resolve() / "browser_queue.json")
         print(f"\n  Saved to: {out}")
+        return 0
+
+    elif args.command == "embed":
+        from .embed.embed_refs import embed_refs
+        n = embed_refs(
+            data_dir=args.data_dir.resolve(),
+            model_name=args.model,
+            batch_size=args.batch_size,
+        )
+        return 0 if n > 0 else 1
+
+    elif args.command == "search":
+        from .embed.embed_refs import search_refs
+        results = search_refs(
+            query=args.query,
+            data_dir=args.data_dir.resolve(),
+            k=args.k,
+            model_name=args.model,
+            depth_filter=args.depth,
+        )
+        print(f"\nSearch: \"{args.query}\"")
+        print(f"{'='*70}")
+        for i, r in enumerate(results, 1):
+            sim = r["similarity"]
+            title = r.get("title", "???")[:60]
+            key = r["cite_key"]
+            depth = r.get("depth", "?")
+            source = r.get("source", "?")
+            doi = r.get("doi", "")
+            print(f"  {i:2d}. [{sim:.3f}] {title}")
+            print(f"      {key}  (d{depth}, {source})")
+            if doi:
+                print(f"      https://doi.org/{doi}")
+        print(f"{'='*70}")
         return 0
 
     elif args.command == "status":
