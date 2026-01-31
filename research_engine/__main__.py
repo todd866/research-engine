@@ -150,6 +150,28 @@ def main() -> int:
         help="Max depth-1 refs to harvest from (0 = all)",
     )
 
+    # queue command
+    queue_parser = subparsers.add_parser(
+        "queue", help="Generate browser download queue"
+    )
+    queue_parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Path to literature-data directory",
+    )
+    queue_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max entries in queue (0 = all)",
+    )
+    queue_parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        default=None,
+        help="Output path for queue JSON (default: data_dir/browser_queue.json)",
+    )
+
     # status command
     status_parser = subparsers.add_parser(
         "status", help="Show pipeline status"
@@ -214,6 +236,24 @@ def main() -> int:
             limit=args.limit,
             verbose=True,
         )
+
+    elif args.command == "queue":
+        from .ingest.browser_queue import generate_queue
+        queue = generate_queue(
+            data_dir=args.data_dir.resolve(),
+            output_path=args.output,
+            limit=args.limit,
+        )
+        print(f"\nBrowser download queue generated:")
+        print(f"  Total:    {queue['total']}")
+        print(f"  Depth-1:  {queue['depth1']}")
+        print(f"  Depth-2:  {queue['depth2']}")
+        print(f"\n  Top publishers:")
+        for prefix, count in list(queue['by_publisher'].items())[:10]:
+            print(f"    {prefix}: {count}")
+        out = args.output or (args.data_dir.resolve() / "browser_queue.json")
+        print(f"\n  Saved to: {out}")
+        return 0
 
     elif args.command == "status":
         from .ingest.pipeline import status_main
