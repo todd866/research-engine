@@ -182,6 +182,9 @@ def harvest_depth2(
     session = requests.Session()
     session.headers["User-Agent"] = f"research-engine/0.1.0 (mailto:{MAILTO})"
 
+    # Use a set for O(1) cite_key uniqueness checks
+    existing_keys = {r["cite_key"] for r in refs}
+
     new_refs = []
     total_raw = 0
     dupes_skipped = 0
@@ -205,12 +208,13 @@ def harvest_depth2(
                 dupes_skipped += 1
                 continue
 
-            # Make cite key unique
+            # Make cite key unique (O(1) set lookup instead of O(n) scan)
             base_key = c["cite_key"]
             counter = 1
-            while any(r["cite_key"] == c["cite_key"] for r in refs + new_refs):
+            while c["cite_key"] in existing_keys:
                 c["cite_key"] = f"{base_key}_{counter}"
                 counter += 1
+            existing_keys.add(c["cite_key"])
 
             # Track the parent ref
             c["cited_by"] = ref["cite_key"]
