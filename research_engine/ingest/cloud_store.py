@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 
-def get_b2_bucket(bucket_name: str = "highdimensional-literature"):
+def get_b2_bucket(bucket_name: str = "md3-storage"):
     """Get a B2 bucket handle.
 
     Requires B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY env vars.
@@ -35,7 +35,7 @@ def upload_pdf(
     local_path: Path,
     cite_key: str,
     bucket=None,
-    bucket_name: str = "highdimensional-literature",
+    bucket_name: str = "md3-storage",
 ) -> str:
     """Upload a PDF to B2.
 
@@ -58,7 +58,7 @@ def download_pdf(
     cite_key: str,
     output_path: Path,
     bucket=None,
-    bucket_name: str = "highdimensional-literature",
+    bucket_name: str = "md3-storage",
 ) -> Path:
     """Download a PDF from B2."""
     if bucket is None:

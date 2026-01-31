@@ -81,13 +81,13 @@ print(sum(1 for r in refs if r.get('doi') and r.get('depth', 1) == 1))
 }
 
 run_ingest() {
-    echo "--- OA Acquisition + Text Extraction ---"
-    python3 -m research_engine ingest "$DATA_DIR"
+    echo "--- OA Acquisition + Text Extraction + B2 Upload ---"
+    python3 -m research_engine ingest "$DATA_DIR" --upload-b2
 
-    # Commit results
+    # Commit results (text files + manifest, PDFs are in B2)
     cd "$DATA_DIR"
-    git add bibliography.json text/ depth2_harvest_log.json
-    git commit -m "Ingest: $(ls text/ | wc -l) text files extracted" || true
+    git add bibliography.json text/ depth2_harvest_log.json pdf_manifest.json
+    git commit -m "Ingest: $(ls text/ | wc -l) text files, PDFs in B2" || true
     git push origin main || true
     cd -
 }

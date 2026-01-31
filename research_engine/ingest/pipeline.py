@@ -57,14 +57,17 @@ def ingest_main(
     skip_download: bool = False,
     upload_b2: bool = False,
 ) -> int:
-    """Run the ingest pipeline: acquire OA PDFs and extract text.
+    """Run the ingest pipeline: acquire OA PDFs, extract text, store in B2.
+
+    When upload_b2 is True, each PDF is uploaded to B2 and deleted locally
+    after text extraction, keeping disk usage low.
 
     Args:
         data_dir: Path to literature-data directory
         limit: Max references to process (0 = all)
         paper_filter: Only process refs from this paper folder
         skip_download: Skip OA download, only extract text from existing PDFs
-        upload_b2: Upload acquired PDFs to B2 after download
+        upload_b2: Upload acquired PDFs to B2 after download (and delete local)
     """
     refs = _load_bibliography(data_dir)
     total = len(refs)
@@ -89,6 +92,25 @@ def ingest_main(
     pdf_dir.mkdir(parents=True, exist_ok=True)
     text_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load manifest to skip already-processed PDFs
+    manifest_path = data_dir / "pdf_manifest.json"
+    manifest = {"pdfs": {}}
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+    # Set up B2 if requested
+    b2_bucket = None
+    if upload_b2:
+        try:
+            from .cloud_store import get_b2_bucket
+            b2_bucket = get_b2_bucket()
+            print(f"  B2 bucket connected: md3-storage")
+        except Exception as e:
+            print(f"  B2 setup failed: {e}")
+            print("  Continuing without B2. PDFs will stay on disk.")
+            b2_bucket = None
+
     # Phase 1: OA acquisition
     acquired = {}
     if not skip_download:
@@ -105,68 +127,78 @@ def ingest_main(
                 acquired[r["cite_key"]] = str(pdf_path)
         print(f"\nSkipping download. Found {len(acquired)} existing PDFs.")
 
-    # Phase 2: Text extraction
+    # Phase 2: Text extraction (+ B2 upload + local delete)
     print(f"\n{'='*60}")
-    print("Phase 2: Text Extraction")
+    print("Phase 2: Text Extraction" + (" + B2 Upload" if b2_bucket else ""))
     print(f"{'='*60}")
 
     extracted = 0
     skipped = 0
     failed = 0
+    uploaded = 0
+    deleted_local = 0
 
-    # Process all PDFs in pdf_dir (not just newly acquired)
+    # Process all PDFs in pdf_dir
     for pdf_path in sorted(pdf_dir.glob("*.pdf")):
-        text_path = text_dir / f"{pdf_path.stem}.txt"
-        if text_path.exists():
+        cite_key = pdf_path.stem
+        text_path = text_dir / f"{cite_key}.txt"
+
+        # Extract text if not already done
+        if not text_path.exists():
+            try:
+                from .extract_text import extract_text
+                extract_text(pdf_path, text_path)
+                extracted += 1
+                if extracted % 10 == 0:
+                    print(f"  Extracted: {extracted}")
+            except Exception as e:
+                failed += 1
+                print(f"  Failed: {pdf_path.name}: {e}")
+                continue
+        else:
             skipped += 1
-            continue
-        try:
-            from .extract_text import extract_text
-            extract_text(pdf_path, text_path)
-            extracted += 1
-            if extracted % 10 == 0:
-                print(f"  Extracted: {extracted}")
-        except Exception as e:
-            failed += 1
-            print(f"  Failed: {pdf_path.name}: {e}")
+
+        # Upload to B2 and delete local copy
+        if b2_bucket and cite_key not in manifest.get("pdfs", {}):
+            try:
+                from .cloud_store import upload_pdf, update_manifest
+                file_id = upload_pdf(pdf_path, cite_key, bucket=b2_bucket)
+                ref = next((r for r in refs if r.get("cite_key") == cite_key), {})
+                update_manifest(manifest_path, cite_key, file_id, doi=ref.get("doi", ""))
+                # Reload manifest after update
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                uploaded += 1
+                # Delete local PDF to save disk
+                pdf_path.unlink()
+                deleted_local += 1
+            except Exception as e:
+                print(f"  B2 upload failed for {cite_key}: {e}")
+        elif b2_bucket and cite_key in manifest.get("pdfs", {}):
+            # Already in B2, just delete local copy
+            pdf_path.unlink()
+            deleted_local += 1
 
     print(f"\n  Newly extracted: {extracted}")
     print(f"  Already had text: {skipped}")
     if failed:
         print(f"  Failed: {failed}")
-
-    # Phase 3: B2 upload (optional)
-    if upload_b2 and acquired:
-        print(f"\n{'='*60}")
-        print("Phase 3: B2 Upload")
-        print(f"{'='*60}")
-        try:
-            from .cloud_store import get_b2_bucket, upload_pdf, update_manifest
-            bucket = get_b2_bucket()
-            manifest_path = data_dir / "pdf_manifest.json"
-            uploaded = 0
-            for cite_key, pdf_path in acquired.items():
-                try:
-                    file_id = upload_pdf(Path(pdf_path), cite_key, bucket=bucket)
-                    ref = next((r for r in refs if r["cite_key"] == cite_key), {})
-                    update_manifest(manifest_path, cite_key, file_id, doi=ref.get("doi", ""))
-                    uploaded += 1
-                except Exception as e:
-                    print(f"  B2 upload failed for {cite_key}: {e}")
-            print(f"  Uploaded to B2: {uploaded}")
-        except Exception as e:
-            print(f"  B2 setup failed: {e}")
-            print("  Set B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY env vars.")
+    if uploaded:
+        print(f"  Uploaded to B2:   {uploaded}")
+    if deleted_local:
+        print(f"  Deleted local:    {deleted_local}")
 
     # Summary
-    total_pdfs = len(list(pdf_dir.glob("*.pdf")))
+    total_pdfs_local = len(list(pdf_dir.glob("*.pdf")))
+    total_pdfs_b2 = len(manifest.get("pdfs", {}))
     total_text = len(list(text_dir.glob("*.txt")))
     print(f"\n{'='*60}")
     print("Ingest Summary")
     print(f"{'='*60}")
     print(f"  Total references:     {total}")
     print(f"  With DOIs:            {len([r for r in _load_bibliography(data_dir) if r.get('doi')])}")
-    print(f"  PDFs acquired:        {total_pdfs}")
+    print(f"  PDFs in B2:           {total_pdfs_b2}")
+    print(f"  PDFs local:           {total_pdfs_local}")
     print(f"  Text files:           {total_text}")
     print(f"{'='*60}")
 
